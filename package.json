@@ -1,0 +1,15 @@
+{
+  "name": "x-reader",
+  "version": "1.0.0",
+  "type": "module",
+  "bin": {
+    "x-reader": "./src/cli.ts"
+  },
+  "scripts": {
+    "start": "bun run src/cli.ts",
+    "build": "bun build --compile src/cli.ts --outfile x-reader"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.0.0"
+  }
+}

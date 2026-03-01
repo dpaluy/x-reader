@@ -1,0 +1,7 @@
+{
+  "browser": "chromium",
+  "cdp_port": null,
+  "max_depth": 2,
+  "max_replies": 50,
+  "data_dir": "./data"
+}
