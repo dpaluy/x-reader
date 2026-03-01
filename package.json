@@ -3,11 +3,14 @@
   "version": "1.0.0",
   "type": "module",
   "bin": {
-    "x-reader": "./src/cli.ts"
+    "x-reader": "./src/cli.ts",
+    "x-bookmarks": "./src/bookmarks.ts"
   },
   "scripts": {
     "start": "bun run src/cli.ts",
-    "build": "bun build --compile src/cli.ts --outfile x-reader"
+    "bookmarks": "bun run src/bookmarks.ts",
+    "build": "bun build --compile src/cli.ts --outfile x-reader",
+    "build:bookmarks": "bun build --compile src/bookmarks.ts --outfile x-bookmarks"
   },
   "devDependencies": {
     "@types/bun": "^1.0.0"

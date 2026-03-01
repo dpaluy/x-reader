@@ -45,6 +45,36 @@ src/types.ts        All interfaces and error types
 
 Output files follow `XReaderOutput` (schema_version "1.0") defined in `src/types.ts`. Key fields: `main_post`, `replies`, `actionable_items`, `external_links`.
 
+## x-bookmarks
+
+Companion CLI that iterates over X bookmarks, extracts each via x-reader's pipeline, and removes the bookmark after processing.
+
+### Entry Point
+
+`src/bookmarks.ts` — standalone CLI, same pattern as `cli.ts`.
+
+### Flow
+
+1. Open `https://x.com/i/bookmarks`, take accessibility snapshot
+2. Auth wall check (same heuristic as extractor)
+3. Parse first bookmark URL from article elements (`/username/status/ID`)
+4. If `data/{statusId}.json` exists → skip extraction, still remove bookmark
+5. Otherwise → `extract()` + `classify()` + `save()`
+6. Scroll to top of post, find bookmark toggle button, click to remove
+7. Track seen IDs — same bookmark appearing twice = removal failed, break
+8. Loop back to step 1
+
+### CLI Args
+
+Same flags as x-reader minus positional URL, plus `--limit <n>`.
+
+### Run
+
+```
+bun run bookmarks -- --limit 5
+bun run build:bookmarks && ./x-bookmarks --limit 5
+```
+
 ## Testing
 
 No test framework configured. Manual verification:

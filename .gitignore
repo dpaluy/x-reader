@@ -3,3 +3,4 @@ data/
 *.tsbuildinfo
 bun.lock
 x-reader
+x-bookmarks
