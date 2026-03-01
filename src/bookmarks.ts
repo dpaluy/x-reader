@@ -22,6 +22,7 @@ const DEFAULTS: Config = {
   max_depth: 2,
   max_replies: 50,
   data_dir: "./data",
+  ignore_ids: [],
 };
 
 async function loadConfig(): Promise<Config> {
@@ -253,6 +254,8 @@ async function main(): Promise<void> {
   let processed = 0;
   const seenIds = new Set<string>();
   const retryCounts = new Map<string, number>();
+  const stuckIds = new Set<string>();
+  const ignoreSet = new Set(config.ignore_ids);
   const MAX_RETRIES_PER_ID = 2;
   const MAX_STUCK_IDS = 5;
 
@@ -286,11 +289,22 @@ async function main(): Promise<void> {
       break;
     }
 
-    let url = bookmarkUrls[0];
-    let statusId = parseStatusId(url);
+    // Find the first actionable bookmark (skip ignored and stuck)
+    let articleIndex = 0;
+    let url = "";
+    let statusId = "";
+    for (let i = 0; i < bookmarkUrls.length; i++) {
+      const id = parseStatusId(bookmarkUrls[i]);
+      if (!id) continue;
+      if (ignoreSet.has(id) || stuckIds.has(id)) continue;
+      url = bookmarkUrls[i];
+      statusId = id;
+      articleIndex = i;
+      break;
+    }
 
     if (!statusId) {
-      console.warn(`Could not parse status ID from: ${url}`);
+      console.log("No actionable bookmarks remaining. Done.");
       break;
     }
 
@@ -302,7 +316,7 @@ async function main(): Promise<void> {
         console.warn(
           `  Bookmark ${statusId} reappeared, retrying removal... (attempt ${retries + 1}/${MAX_RETRIES_PER_ID})`,
         );
-        const removed = await removeBookmarkFromList(snap, url);
+        const removed = await removeBookmarkFromList(snap, url, articleIndex);
         if (!removed) {
           console.warn("  List removal failed, escalating to post page...");
           await open(url);
@@ -312,31 +326,19 @@ async function main(): Promise<void> {
         continue;
       }
 
-      // Retries exhausted — skip past this bookmark and process the next one
+      // Retries exhausted — mark as stuck
+      stuckIds.add(statusId);
       console.warn(
-        `  Bookmark ${statusId} stuck after ${MAX_RETRIES_PER_ID} attempts, skipping to next`,
+        `  Bookmark ${statusId} stuck after ${MAX_RETRIES_PER_ID} attempts (deleted post?)`,
       );
-      if (bookmarkUrls.length > 1) {
-        url = bookmarkUrls[1];
-        statusId = parseStatusId(url);
-        if (!statusId) {
-          console.warn(`  Could not parse status ID from fallback: ${url}`);
-          continue;
-        }
-        // If the fallback is also already seen, just continue to next loop iteration
-        if (seenIds.has(statusId)) {
-          continue;
-        }
-      } else {
-        continue;
-      }
 
-      if (retryCounts.size >= MAX_STUCK_IDS) {
+      if (stuckIds.size >= MAX_STUCK_IDS) {
         console.error(
           `${MAX_STUCK_IDS}+ distinct stuck bookmarks. Stopping.`,
         );
         break;
       }
+      continue;
     }
     seenIds.add(statusId);
 
@@ -348,7 +350,7 @@ async function main(): Promise<void> {
     // This avoids reply-page confusion where scrolling to top finds the
     // parent post's bookmark button instead of the actual bookmarked reply.
     console.log("  Removing bookmark...");
-    await removeBookmarkFromList(snap, url);
+    await removeBookmarkFromList(snap, url, articleIndex);
 
     const outputPath = join(config.data_dir, `${statusId}.json`);
     const alreadyExtracted = await Bun.file(outputPath).exists();
@@ -394,6 +396,15 @@ async function main(): Promise<void> {
   }
 
   console.log(`\nProcessed ${processed} bookmark(s).`);
+
+  if (stuckIds.size > 0) {
+    const ids = [...stuckIds].map((id) => `    "${id}"`).join(",\n");
+    console.log(
+      `\n${stuckIds.size} bookmark(s) could not be removed (likely deleted posts).` +
+        `\nAdd them to ignore_ids in config.json to skip on future runs:\n` +
+        `\n  "ignore_ids": [\n${ids}\n  ]`,
+    );
+  }
 }
 
 main().catch((err) => {

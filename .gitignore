@@ -4,3 +4,4 @@ data/
 bun.lock
 x-reader
 x-bookmarks
+config.json

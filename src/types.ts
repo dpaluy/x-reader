@@ -37,6 +37,7 @@ export interface Config {
   max_depth: number;
   max_replies: number;
   data_dir: string;
+  ignore_ids: string[];
 }
 
 export class AuthRequiredError extends Error {
