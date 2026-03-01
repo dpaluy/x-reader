@@ -150,17 +150,29 @@ function parseStatusId(url: string): string {
 async function removeBookmarkFromList(
   bookmarksSnap: string,
   url: string,
+  articleIndex: number = 0,
 ): Promise<boolean> {
+  const statusId = parseStatusId(url);
+
   // On the bookmarks page, every article has a "Bookmarked" button.
-  // Click the first one to un-bookmark the top post.
-  const bookmarkMatch = bookmarksSnap.match(
-    /button "Bookmarked" \[ref=(e\d+)\]/,
-  );
-  if (bookmarkMatch) {
-    await click(`@${bookmarkMatch[1]}`);
+  // Click the one at articleIndex to un-bookmark the target post.
+  const bookmarkMatches = [
+    ...bookmarksSnap.matchAll(/button "Bookmarked" \[ref=(e\d+)\]/g),
+  ];
+  if (bookmarkMatches.length > articleIndex) {
+    await click(`@${bookmarkMatches[articleIndex][1]}`);
     await wait(2000);
-    console.log("  Removed from bookmarks list");
-    return true;
+
+    // Verify removal: snapshot again and check target is gone
+    const verifySnap = await snapshot();
+    const verifyUrls = parseBookmarkUrls(verifySnap);
+    const stillPresent = verifyUrls.length > 0 && parseStatusId(verifyUrls[0]) === statusId;
+    if (!stillPresent) {
+      console.log("  Removed from bookmarks list (verified)");
+      return true;
+    }
+    console.warn("  Click registered but bookmark still present");
+    return false;
   }
 
   // Fallback: three-dot menu (article elements have no [ref], so find
@@ -239,8 +251,10 @@ async function main(): Promise<void> {
   await ensureDataDir(config);
 
   let processed = 0;
-  let skipped = 0;
   const seenIds = new Set<string>();
+  const retryCounts = new Map<string, number>();
+  const MAX_RETRIES_PER_ID = 2;
+  const MAX_STUCK_IDS = 5;
 
   console.log("Opening bookmarks page...");
 
@@ -272,8 +286,8 @@ async function main(): Promise<void> {
       break;
     }
 
-    const url = bookmarkUrls[0];
-    const statusId = parseStatusId(url);
+    let url = bookmarkUrls[0];
+    let statusId = parseStatusId(url);
 
     if (!statusId) {
       console.warn(`Could not parse status ID from: ${url}`);
@@ -281,17 +295,48 @@ async function main(): Promise<void> {
     }
 
     if (seenIds.has(statusId)) {
+      const retries = retryCounts.get(statusId) ?? 0;
+      retryCounts.set(statusId, retries + 1);
+
+      if (retries < MAX_RETRIES_PER_ID) {
+        console.warn(
+          `  Bookmark ${statusId} reappeared, retrying removal... (attempt ${retries + 1}/${MAX_RETRIES_PER_ID})`,
+        );
+        const removed = await removeBookmarkFromList(snap, url);
+        if (!removed) {
+          console.warn("  List removal failed, escalating to post page...");
+          await open(url);
+          await waitForLoad();
+          await removeBookmark();
+        }
+        continue;
+      }
+
+      // Retries exhausted — skip past this bookmark and process the next one
       console.warn(
-        `  Skipping bookmark ${statusId} — appeared again after removal attempt.`,
+        `  Bookmark ${statusId} stuck after ${MAX_RETRIES_PER_ID} attempts, skipping to next`,
       );
-      // Try removing via the bookmarks page directly (three-dot menu)
-      await removeBookmarkFromList(snap, url);
-      skipped++;
-      if (skipped >= 3) {
-        console.error("Too many stuck bookmarks. Stopping.");
+      if (bookmarkUrls.length > 1) {
+        url = bookmarkUrls[1];
+        statusId = parseStatusId(url);
+        if (!statusId) {
+          console.warn(`  Could not parse status ID from fallback: ${url}`);
+          continue;
+        }
+        // If the fallback is also already seen, just continue to next loop iteration
+        if (seenIds.has(statusId)) {
+          continue;
+        }
+      } else {
+        continue;
+      }
+
+      if (retryCounts.size >= MAX_STUCK_IDS) {
+        console.error(
+          `${MAX_STUCK_IDS}+ distinct stuck bookmarks. Stopping.`,
+        );
         break;
       }
-      continue;
     }
     seenIds.add(statusId);
 

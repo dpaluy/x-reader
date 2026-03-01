@@ -68,6 +68,34 @@ export async function screenshot(path: string): Promise<void> {
   await run("screenshot", path);
 }
 
+export async function evaluate(js: string): Promise<string> {
+  const proc = Bun.spawn(
+    ["agent-browser", ...connectFlags, "eval", "--stdin"],
+    {
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "pipe",
+    },
+  );
+
+  proc.stdin.write(js);
+  proc.stdin.end();
+
+  const [stdout, stderr] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+  ]);
+
+  const exitCode = await proc.exited;
+  if (exitCode !== 0) {
+    throw new Error(
+      `agent-browser eval failed (exit ${exitCode}): ${stderr || stdout}`,
+    );
+  }
+
+  return stdout;
+}
+
 export async function close(): Promise<void> {
   await run("close");
 }

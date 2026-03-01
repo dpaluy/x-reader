@@ -1,6 +1,6 @@
-import { open, waitForLoad, snapshot, scroll, click, wait } from "./browser";
+import { open, waitForLoad, snapshot, scroll, click, wait, evaluate } from "./browser";
 import { AuthRequiredError } from "./types";
-import type { Tweet, Config } from "./types";
+import type { Tweet, Config, MediaItem } from "./types";
 
 interface ExtractionResult {
   mainPost: Tweet;
@@ -9,6 +9,7 @@ interface ExtractionResult {
 
 interface ParsedArticle extends Tweet {
   _views: number;
+  _imageCount: number;
 }
 
 export async function extract(
@@ -21,8 +22,16 @@ export async function extract(
   const initialSnap = await snapshot();
   detectAuthWall(initialSnap);
 
-  const { mainPost, mainPostViews } = parseMainPost(initialSnap);
+  const { mainPost, mainPostViews, mainPostImageCount } = parseMainPost(initialSnap);
   const mainPostKey = `${mainPost.author}:${mainPost.text.slice(0, 80)}`;
+
+  // Resolve media URLs for main post before scrolling away from it
+  if (mainPostImageCount > 0) {
+    const allMedia = await extractMediaUrls();
+    if (allMedia.length > 0) {
+      mainPost.media = buildMediaItems(mainPostImageCount, allMedia[0]);
+    }
+  }
 
   // Click "Read N replies" button if present (logged-out view)
   await expandReplies(initialSnap);
@@ -50,7 +59,9 @@ export async function extract(
     const snap = await snapshot();
     const articles = parseArticles(snap);
     let newCount = 0;
+    let needsMediaResolve = false;
 
+    const newReplies: { tweet: Tweet; imageCount: number }[] = [];
     for (const article of articles) {
       // Skip recommended/trending posts injected by X into the thread.
       // Real replies never have more views than the parent post.
@@ -60,10 +71,35 @@ export async function extract(
       if (seenKeys.has(key)) continue;
       seenKeys.add(key);
 
-      const { _views, ...tweet } = article;
-      replies.push({ ...tweet, depth: 1 });
+      const { _views, _imageCount, ...tweet } = article;
+      newReplies.push({ tweet: { ...tweet, depth: 1 }, imageCount: _imageCount });
+      if (_imageCount > 0) needsMediaResolve = true;
       newCount++;
-      if (replies.length >= config.max_replies) break;
+      if (replies.length + newCount >= config.max_replies) break;
+    }
+
+    // Resolve media for new replies that have images
+    if (needsMediaResolve) {
+      const allMedia = await extractMediaUrls();
+      // Map articles from snapshot to media by position
+      for (let ai = 0; ai < newReplies.length; ai++) {
+        const r = newReplies[ai];
+        if (r.imageCount > 0) {
+          // Find matching article media — articles includes main post + replies visible on screen
+          // We search allMedia for one with the right image count
+          for (let mi = 0; mi < allMedia.length; mi++) {
+            if (allMedia[mi].length === r.imageCount) {
+              r.tweet.media = buildMediaItems(r.imageCount, allMedia[mi]);
+              allMedia.splice(mi, 1); // consume it
+              break;
+            }
+          }
+        }
+      }
+    }
+
+    for (const r of newReplies) {
+      replies.push(r.tweet);
     }
 
     emptyScrolls = newCount > 0 ? 0 : emptyScrolls + 1;
@@ -109,11 +145,11 @@ function detectAuthWall(snap: string): void {
   }
 }
 
-function parseMainPost(snap: string): { mainPost: Tweet; mainPostViews: number } {
+function parseMainPost(snap: string): { mainPost: Tweet; mainPostViews: number; mainPostImageCount: number } {
   const articles = parseArticles(snap);
   if (articles.length > 0) {
-    const { _views, ...tweet } = articles[0];
-    return { mainPost: { ...tweet, depth: 0 }, mainPostViews: _views };
+    const { _views, _imageCount, ...tweet } = articles[0];
+    return { mainPost: { ...tweet, depth: 0 }, mainPostViews: _views, mainPostImageCount: _imageCount };
   }
   return {
     mainPost: {
@@ -123,8 +159,10 @@ function parseMainPost(snap: string): { mainPost: Tweet; mainPostViews: number }
       timestamp: new Date().toISOString(),
       depth: 0,
       urls: collectAllUrls(snap),
+      media: [],
     },
     mainPostViews: 0,
+    mainPostImageCount: 0,
   };
 }
 
@@ -156,16 +194,16 @@ function parseArticles(snap: string): ParsedArticle[] {
     const trimmed = line.trimStart();
 
     // Find article elements — these are tweet boundaries
-    // Lines look like: "- article ..." or "article ..."
+    // Lines look like: "- article ..." or "article:" (bare, for main posts)
     const stripped = trimmed.replace(/^-\s+/, "");
-    if (!stripped.startsWith("article ")) continue;
+    if (!/^article[\s:]/.test(stripped)) continue;
 
     // Determine the indentation of this article
     const articleIndent = line.length - trimmed.length;
 
     // Extract handle from article description: @handle
     const handleMatch = stripped.match(/@(\w{1,15})\b/);
-    const author = handleMatch ? `@${handleMatch[1]}` : "unknown";
+    let author = handleMatch ? `@${handleMatch[1]}` : "unknown";
 
     // Extract view count from article description: "N views"
     const viewsMatch = stripped.match(/(\d+)\s+views/);
@@ -185,9 +223,20 @@ function parseArticles(snap: string): ParsedArticle[] {
       j++;
     }
 
+    // For bare articles (main post), extract handle from child links
+    if (author === "unknown") {
+      for (const childLine of articleLines.slice(0, 10)) {
+        const childHandle = childLine.trimStart().replace(/^-\s+/, "").match(/^link "@(\w{1,15})"/);
+        if (childHandle) {
+          author = `@${childHandle[1]}`;
+          break;
+        }
+      }
+    }
+
     const tweet = parseArticleContent(author, articleLines, childIndent);
     if (tweet.text.length > 0) {
-      articles.push({ ...tweet, _views: views });
+      articles.push({ ...tweet, _views: views, _imageCount: tweet._imageCount });
     }
 
     i = j - 1; // advance past this article
@@ -200,10 +249,11 @@ function parseArticleContent(
   author: string,
   rawLines: string[],
   childIndent: number,
-): Tweet {
+): Tweet & { _imageCount: number } {
   let displayName = author.replace("@", "");
   let displayNameFound = false;
   let timestamp = "";
+  let imageCount = 0;
   const textParts: string[] = [];
   const urls: string[] = [];
 
@@ -294,6 +344,13 @@ function parseArticleContent(
     // Only collect content from direct children
     if (!isDirectChild) continue;
 
+    // Detect link "Image" — media placeholder
+    if (/^link "Image"/.test(line)) {
+      imageCount++;
+      textParts.push(`[image:${imageCount}]`);
+      continue;
+    }
+
     // Text content
     const textMatch = line.match(/^text:\s+(.+)$/);
     if (textMatch) {
@@ -332,7 +389,37 @@ function parseArticleContent(
     timestamp: timestamp || new Date().toISOString(),
     depth: 0,
     urls: [...new Set(urls)],
+    media: [],
+    _imageCount: imageCount,
   };
+}
+
+async function extractMediaUrls(): Promise<{ src: string; alt: string }[][]> {
+  const js = `Array.from(document.querySelectorAll('article')).map(a =>
+    Array.from(a.querySelectorAll('img'))
+      .filter(i => i.src.includes('pbs.twimg.com/media/'))
+      .map(i => ({ src: i.src.replace('name=medium', 'name=large'), alt: i.alt || '' }))
+  )`;
+  try {
+    const raw = await evaluate(js);
+    return JSON.parse(raw.trim());
+  } catch {
+    return [];
+  }
+}
+
+function buildMediaItems(
+  imageCount: number,
+  urls: { src: string; alt: string }[],
+): MediaItem[] {
+  const items: MediaItem[] = [];
+  for (let i = 0; i < imageCount; i++) {
+    const url = urls[i];
+    if (url) {
+      items.push({ index: i + 1, url: url.src, alt: url.alt || undefined });
+    }
+  }
+  return items;
 }
 
 function stripQuotes(s: string): string {

@@ -9,6 +9,12 @@ export interface XReaderOutput {
   external_links: string[];
 }
 
+export interface MediaItem {
+  index: number;
+  url: string;
+  alt?: string;
+}
+
 export interface Tweet {
   author: string;
   display_name: string;
@@ -16,6 +22,7 @@ export interface Tweet {
   timestamp: string;
   depth: number;
   urls: string[];
+  media: MediaItem[];
 }
 
 export interface ActionableItem {
